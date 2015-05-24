@@ -1,0 +1,183 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Kathryn Christensen"
+date: "Saturday, May 23, 2015"
+output: html_document
+---
+
+
+
+```{r, echo=FALSE}
+library(caret)
+library(randomForest)
+library(caTools)
+library(reshape2)
+library(ggplot2)
+library(e1071)
+```
+## Introduction:
+This project will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were then asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal of the project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. 
+
+## Data:
+The data was collected as part of the Human Activity Recognition Project. http://groupware.les.inf.puc-rio.br/har provides more information on the collection and project.
+```{r}
+train<-read.csv("pml-training.csv")
+test<-read.csv("pml-testing2.csv")
+```
+First look at the data:
+```{r}
+summary (train)
+```
+
+The data has many variables that are very sparsley populated. These can be removed without impacting the analysis.  If any particular column has more than 10% of either NAs or blanks, the column is removed.
+```{r}
+cutoff<-.1*nrow(train)
+keep<-rep_len(1, ncol(train))
+for(i in 1:(length(names(train))-1)){               
+        if ((sum(is.na(train[[i]]))>cutoff)|| (sum(train[[i]]=="")>cutoff)) {
+                keep[i]<-0
+        }       
+}
+train<-subset(train,select=subset(names(train),keep==1))
+```
+The first 7 columns of data are informational and will not contribute to the analysis.  These are removed as well.
+```{r}
+train<-train[,8:60]
+```
+
+Looking at the summary statistics it appears there are some outliers in the gyro measurements for forearm and barbell.
+```{r}
+sdDB<-apply(train[,31:33],2,sd)
+olNum<-which (train$gyros_dumbbell_x < -(as.numeric(3*sdDB[1])))
+```
+Row number `r olNum` appears to be the only row that has an extreme value (>3 SD from mean) in the gyros_dumbbell_x variable.  Let's look at the other gyro values in that row for dumbbell and forearm:
+
+```{r}
+rbind(colMeans(train[,31:33]),train[olNum,31:33])
+rbind(colMeans(train[,44:46]),train[olNum,44:46])
+```
+
+Impute those values with the mean for others in that class:
+```{r}
+train[olNum,"gyros_dumbbell_x"]<-NA
+train[olNum,"gyros_dumbbell_y"]<-NA
+train[olNum,"gyros_dumbbell_z"]<-NA
+train[olNum,"gyros_forearm_x"]<-NA
+train[olNum,"gyros_forearm_y"]<-NA
+train[olNum,"gyros_forearm_z"]<-NA
+
+train[olNum,"gyros_dumbbell_x"]<-mean(train[train$classe==train$classe[olNum],"gyros_dumbbell_x"],na.rm=TRUE)
+train[olNum,"gyros_dumbbell_y"]<-mean(train[train$classe==train$classe[olNum],"gyros_dumbbell_y"],na.rm=TRUE)
+train[olNum,"gyros_dumbbell_z"]<-mean(train[train$classe==train$classe[olNum],"gyros_dumbbell_z"],na.rm=TRUE)
+
+train[olNum,"gyros_forearm_x"]<-mean(train[train$classe==train$classe[olNum],"gyros_forearm_x"],na.rm=TRUE)
+train[olNum,"gyros_forearm_y"]<-mean(train[train$classe==train$classe[olNum],"gyros_forearm_y"],na.rm=TRUE)
+train[olNum,"gyros_forearm_z"]<-mean(train[train$classe==train$classe[olNum],"gyros_forearm_z"],na.rm=TRUE)
+```
+
+Much better now:
+```{r}
+summary(cbind(train[,31:33],train[,44:46]))
+```
+
+## Exploratory Data Analysis
+For the exploratory data analysis I wanted to be able to view the data across the different classes ("classe" variable).  I starting by centering and scaling the data to make it easier to view.
+
+```{r}
+tr<-train[,-53]
+preProcValues <- preProcess(tr, method = c("center", "scale"))
+tr<-predict(preProcValues,tr)
+
+tr<-cbind(tr,train[,53])
+
+colnames(tr)[53]<-"classe"
+belt<-cbind(tr[,1:13],tr[,53])
+colnames(belt)[14]<-"classe"
+arm<-cbind(tr[,14:26],tr[,53])
+colnames(arm)[14]<-"classe"
+dumbbell<-cbind(tr[,27:39],tr[,53])
+colnames(dumbbell)[14]<-"classe"
+forearm<-cbind(tr[,40:53])
+colnames(forearm)[14]<-"classe"
+
+catPlot<-function(dataMelt){
+       ggplot(dataMelt, aes(classe, value)) +
+         geom_boxplot(aes(color=classe),width=.7,outlier.size = .5) +
+         facet_wrap(~ variable, scale="free_y") +
+         theme(legend.position="bottom")
+}
+```
+
+###Belt Measurements:
+```{r}
+beltMelt<-melt(belt,id.vars=c("classe"))
+catPlot(beltMelt)
+```
+
+###Arm Measurements:
+```{r}
+armMelt<-(melt(arm,id.vars=c("classe")))
+catPlot(armMelt)
+```
+
+###Forearm Measurements:
+```{r}
+forearmMelt<-melt(forearm,id.vars=c("classe"))
+catPlot(forearmMelt)
+```
+
+###Dumbbell Measurements:
+```{r}
+dumbbellMelt<-melt(dumbbell,id.vars=c("classe"))
+catPlot(dumbbellMelt)
+```
+
+
+## Model Development
+Split the training data into two parts: one for model development and one for validation.
+```{r}
+set.seed(123)
+split = createDataPartition(train$classe, p = 0.6, list=FALSE)
+
+trM = train[split,]
+trV= train[-split,]
+```
+
+Tune the mtry parameter for use in the random forest model.  This parameter specifies how many variables are selected at each split point.  This function starts at the default value and searches nearby for the optimal value (the one the produces the best Out-of-Bag error estimate).
+```{r, fig.width=4, fig.height=3}
+set.seed(111)
+tuneRF(trM[,-53],trM[,53],ntreeTry=1000,stepFactor=1.5)
+```
+Use mtry = 10 in Random Forest Model
+```{r}
+rf<-randomForest(classe~.,data=trM, ntree=1000,mtry=10,importance=TRUE)
+```
+Look at most important variables:
+```{r}
+imp<-importance(rf,scale=TRUE)
+head(sort(imp[,6],decreasing=TRUE),12)
+```
+Look at model statistics and error plot:
+```{r, fig.width=6, fig.height=5}
+rf
+plot(rf, main="Error vs. number of trees")
+legend("topright", colnames(rf$err.rate),col=1:6,cex=0.8,fill=1:6)
+```
+
+The predicted OOB (out of sample) error is: 0.64% .  The Random Forest algorithm performs the cross validation inherently but just for completeness let's check that against the validation data.  From the plot you can see that the error reduces with the number of trees.  Class "A" seems to have the lowest error rate and class "D" the highest.
+
+```{r}
+rfPred<-predict(rf,newdata=trV)
+cm<-confusionMatrix(rfPred,trV$classe)
+print (cm)
+```
+
+## Conclusion:
+The model has an accuracy of `r cm$overall[1]`, and an out of sample error rate of `r (1-cm$overall[1])*100`%, which is consistent with our expectations.  Hopefully this accuracy will be sufficient to successfully predict the 20 cases in the test set!
+
+###References:
+Data:
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#sbia_paper_section#ixzz3aUa2ofBD
+
